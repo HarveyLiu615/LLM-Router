@@ -1,30 +1,30 @@
 # DesensitizeProxy
 
-[中文文档](README.zh-CN.md)
+[Chinese documentation](README.zh-CN.md)
 
-> 本地优先的 PII 脱敏代理。在请求发送到云端 LLM 之前，先用 Regex 和可选本地小模型识别并替换手机号、身份证、邮箱、地址、密钥等敏感信息。
+> A local-first PII redaction proxy. Before requests are sent to a cloud LLM, it detects and replaces sensitive content such as phone numbers, national IDs, email addresses, physical addresses, and secret keys with Regex rules and an optional local model.
 
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com/)
 [![YARP](https://img.shields.io/badge/YARP-2.3-blue)](https://microsoft.github.io/reverse-proxy/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-DesensitizeProxy 是一个 ASP.NET Core + YARP 实现的隐私保护反向代理。客户端继续使用 OpenAI-compatible、Anthropic、Gemini 或 Vertex 风格接口，代理会在转发前改写请求体中的文本内容，并为不同上游自动补齐鉴权头。
+DesensitizeProxy is a privacy-preserving reverse proxy built with ASP.NET Core and YARP. Clients can keep using OpenAI-compatible, Anthropic, Gemini, or Vertex-style APIs. The proxy rewrites textual request bodies before forwarding them and injects the correct authentication headers for each upstream provider.
 
 ```text
 Client -> Regex redaction -> Rule engine -> Optional local LLM redaction -> Provider transform -> Upstream LLM
 ```
 
-默认策略偏向可用性：Regex 始终先运行；本地 LLM 不可用时，在非 StrictMode 下会降级为 Regex-only 转发。对高安全场景，可以开启 `StrictMode`，让命中敏感信号但无法完成语义脱敏的请求直接失败。
+The default policy favors availability: Regex redaction always runs first; if the local LLM is unavailable, non-StrictMode requests fall back to Regex-only forwarding. For high-security deployments, enable `StrictMode` so requests with sensitive signals fail when semantic redaction cannot complete.
 
 ## Features
 
-- **本地优先脱敏**：Regex 规则先行，覆盖手机号、身份证、邮箱、SSH 私钥、AWS Key、数据库连接串、快递单号、门禁码等。
-- **可选语义脱敏**：通过 Ollama 或 OpenAI-compatible 本地模型提取 PII JSON，再由代码执行替换。
-- **失败安全边界**：LLM 脱敏结果写回前会再次运行 Regex，避免恢复已脱敏内容。
-- **多协议上游**：支持 OpenAI-compatible、Anthropic、Gemini、Vertex 请求转发与鉴权头转换。
-- **规则引擎分级**：根据 Trigger / Hint / None 判断是否需要调用本地 LLM，降低无意义模型调用。
-- **跨平台部署**：支持 Docker、Docker Compose、systemd、launchd、Windows Service 和多 RID 发布。
-- **可观测性**：提供 `/health`、Prometheus 风格指标、JSON Lines 脱敏审计日志。
+- **Local-first redaction**: Regex rules run first and cover phone numbers, national IDs, email addresses, SSH private keys, AWS keys, database connection strings, delivery tracking numbers, access codes, and more.
+- **Optional semantic redaction**: Use Ollama or another OpenAI-compatible local model to extract PII as JSON, then let application code perform deterministic replacement.
+- **Fail-safe boundary**: Regex redaction runs again before LLM-redacted text is written back, preventing already-redacted content from being restored.
+- **Multi-provider forwarding**: Supports OpenAI-compatible, Anthropic, Gemini, and Vertex request forwarding with provider-specific authentication transforms.
+- **Rule-engine triage**: Uses Trigger / Hint / None decisions to call the local LLM only when it is useful.
+- **Cross-platform deployment**: Supports Docker, Docker Compose, systemd, launchd, Windows Service, and multi-RID publishing.
+- **Observability**: Provides `/health`, Prometheus-style metrics, and JSON Lines redaction audit logs.
 
 ## Table of Contents
 
@@ -209,7 +209,7 @@ curl http://127.0.0.1:8403/v1/chat/completions \
     "messages": [
       {
         "role": "user",
-        "content": "我叫张三，手机号 13912345678，邮箱 zhangsan@example.com。"
+        "content": "My name is Alice Zhang. My phone number is 13912345678 and my email is alice@example.com."
       }
     ]
   }'
@@ -218,7 +218,7 @@ curl http://127.0.0.1:8403/v1/chat/completions \
 The upstream receives redacted content similar to:
 
 ```text
-我叫[REDACTED:NAME]，手机号 [REDACTED:PHONE]，邮箱 [REDACTED:EMAIL]。
+My name is [REDACTED:NAME]. My phone number is [REDACTED:PHONE] and my email is [REDACTED:EMAIL].
 ```
 
 Control-plane endpoints without JSON request bodies, such as `GET /v1/models`, bypass redaction and are forwarded with the configured upstream authentication.
@@ -272,7 +272,7 @@ curl http://127.0.0.1:8403/v1beta/models/gemini-2.5-flash:generateContent \
   -H "Content-Type: application/json" \
   -d '{
     "contents": [
-      {"parts": [{"text": "我的手机号是 13912345678"}]}
+      {"parts": [{"text": "My phone number is 13912345678."}]}
     ]
   }'
 ```
