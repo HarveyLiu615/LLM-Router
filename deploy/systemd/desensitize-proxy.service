@@ -1,0 +1,16 @@
+[Unit]
+Description=Desensitize Privacy Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/desensitize-proxy
+ExecStart=/usr/bin/dotnet /opt/desensitize-proxy/DesensitizeProxy.AspNetCore.dll
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=-/etc/desensitize-proxy.env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+
+[Install]
+WantedBy=multi-user.target

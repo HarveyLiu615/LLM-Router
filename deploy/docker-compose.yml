@@ -1,0 +1,18 @@
+services:
+  privacy-proxy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8403:8403"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      PrivacyProxy__Proxy__BindAddress: 0.0.0.0
+      PrivacyProxy__Proxy__Port: 8403
+      PrivacyProxy__Runtime__DataDirectory: /data
+      PrivacyProxy__Runtime__LogDirectory: /logs
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+      - ./prompts:/app/prompts:ro

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DesensitizeProxy.AspNetCore/DesensitizeProxy.AspNetCore.csproj" />
+    <Project Path="src/DesensitizeProxy.Core/DesensitizeProxy.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DesensitizeProxy.Core.Tests/DesensitizeProxy.Core.Tests.csproj" />
+  </Folder>
+</Solution>

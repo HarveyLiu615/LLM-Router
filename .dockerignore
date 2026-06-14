@@ -1,0 +1,11 @@
+.git
+.DS_Store
+artifacts
+**/bin
+**/obj
+**/TestResults
+.vs
+.vscode
+*.user
+*.suo
+*.rsuser
