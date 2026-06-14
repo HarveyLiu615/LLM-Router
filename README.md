@@ -1,565 +1,293 @@
-# DesensitizeProxy — 本地 PII 脱敏代理
+# DesensitizeProxy
 
-一个 .NET 10 隐私脱敏代理，拦截用户消息 → 识别并脱敏 PII（手机号、身份证、姓名、地址、密码等） → 转发到云端 LLM。
+[中文文档](README.zh-CN.md)
 
-```
-用户消息 → Regex 脱敏 (确定性) → 规则引擎分级 → LLM 语义脱敏 (尽力) → 云端 LLM
-```
+> 本地优先的 PII 脱敏代理。在请求发送到云端 LLM 之前，先用 Regex 和可选本地小模型识别并替换手机号、身份证、邮箱、地址、密钥等敏感信息。
 
-**设计原则**：纵深防御、失败安全、Regex 不可回退。默认 StrictMode=false，LLM 脱敏失败时静默降级为 Regex-only 转发，不阻断业务。
+[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com/)
+[![YARP](https://img.shields.io/badge/YARP-2.3-blue)](https://microsoft.github.io/reverse-proxy/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
----
+DesensitizeProxy 是一个 ASP.NET Core + YARP 实现的隐私保护反向代理。客户端继续使用 OpenAI-compatible、Anthropic、Gemini 或 Vertex 风格接口，代理会在转发前改写请求体中的文本内容，并为不同上游自动补齐鉴权头。
 
-## 目录
-
-- [架构概览](#架构概览)
-- [安装指南](#安装指南)
-  - [macOS](#macos)
-  - [Linux](#linux)
-  - [Windows](#windows)
-  - [Docker](#docker)
-- [配置说明](#配置说明)
-- [使用示例](#使用示例)
-- [健康检查 & 可观测性](#健康检查--可观测性)
-- [编译 & 发布](#编译--发布)
-- [常用场景配置](#常用场景配置)
-- [项目结构](#项目结构)
-
----
-
-## 架构概览
-
-```
-┌─────────────────────────────────────────────────┐
-│          DesensitizeProxyMiddleware              │
-│                                                 │
-│  请求 → 读取 body → 抽取 TextPart[]              │
-│     │                                           │
-│     ▼                                           │
-│  Layer 1: Regex 脱敏（始终运行）                  │
-│    Phase 1: 硬编码  (SSH Key, AWS Key…)  不可关闭 │
-│    Phase 2: 可配    (手机号/身份证/邮箱)  默认开启 │
-│    Phase 3: 上下文  (密码是/取件码…)  关键词门控  │
-│     │                                           │
-│     ▼                                           │
-│  规则引擎分级 (基于原始文本)                      │
-│    Trigger → 必须追加 LLM                        │
-│    Hint    → 结合 Regex 命中/StrictMode 判定     │
-│    None    → 跳过 LLM                            │
-│     │                                           │
-│     ▼                                           │
-│  Layer 2: LLM 两步法脱敏（尽力）                  │
-│    Step 1: 本地小模型提取 PII JSON                │
-│    Step 2: 代码按 value 长度降序替换              │
-│    Step 3: Regex 兜底（不可回退）                 │
-│     │                                           │
-│     ▼                                           │
-│  Schema 清洗 → Multi-auth → YARP 转发            │
-└─────────────────────────────────────────────────┘
+```text
+Client -> Regex redaction -> Rule engine -> Optional local LLM redaction -> Provider transform -> Upstream LLM
 ```
 
-**三层协同**：Regex 成本最低始终运行，LLM 成本最高仅在规则引擎判定需要时才调用。LLM 结果写回前必须再跑 Regex 兜底，确保不会还原已脱敏内容。
+默认策略偏向可用性：Regex 始终先运行；本地 LLM 不可用时，在非 StrictMode 下会降级为 Regex-only 转发。对高安全场景，可以开启 `StrictMode`，让命中敏感信号但无法完成语义脱敏的请求直接失败。
 
----
+## Features
 
-## 安装指南
+- **本地优先脱敏**：Regex 规则先行，覆盖手机号、身份证、邮箱、SSH 私钥、AWS Key、数据库连接串、快递单号、门禁码等。
+- **可选语义脱敏**：通过 Ollama 或 OpenAI-compatible 本地模型提取 PII JSON，再由代码执行替换。
+- **失败安全边界**：LLM 脱敏结果写回前会再次运行 Regex，避免恢复已脱敏内容。
+- **多协议上游**：支持 OpenAI-compatible、Anthropic、Gemini、Vertex 请求转发与鉴权头转换。
+- **规则引擎分级**：根据 Trigger / Hint / None 判断是否需要调用本地 LLM，降低无意义模型调用。
+- **跨平台部署**：支持 Docker、Docker Compose、systemd、launchd、Windows Service 和多 RID 发布。
+- **可观测性**：提供 `/health`、Prometheus 风格指标、JSON Lines 脱敏审计日志。
 
-### 前置依赖
+## Table of Contents
 
-所有平台都需要：
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Provider Routing](#provider-routing)
+- [Health and Observability](#health-and-observability)
+- [Deployment](#deployment)
+- [Development](#development)
+- [Project Structure](#project-structure)
+- [Security Notes](#security-notes)
+- [License](#license)
 
-| 依赖 | 说明 |
-|------|------|
-| .NET 10 SDK | 编译和运行 |
-| Ollama (可选) | 本地 LLM 语义脱敏。不需要语义脱敏可跳过，退化为纯 Regex 模式 |
+## Quick Start
 
-> **提示**：如果不跑本地 LLM，将配置中 `LocalModel.Enabled` 设为 `false` 即可，代理仅使用 Regex 脱敏（手机号/身份证/邮箱/SSH Key 等）。
+### Prerequisites
 
----
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- Ollama or another OpenAI-compatible local model endpoint, optional but recommended for semantic redaction
+- At least one upstream LLM API key
 
-### macOS
-
-#### 1. 安装 .NET 10 SDK
+### Run locally
 
 ```bash
-brew install dotnet-sdk
-
-# 验证
-dotnet --version   # 应显示 10.x.x
-```
-
-#### 2. 安装 Ollama（可选，用于语义脱敏）
-
-```bash
-brew install ollama
-
-# 启动服务
-ollama serve
-
-# 新开终端，拉取推荐模型
-ollama pull openbmb/minicpm4.1
-```
-
-#### 3. 克隆 & 构建
-
-```bash
-git clone <repo-url> && cd locrouter
-
-dotnet restore
-dotnet build -c Release
-```
-
-#### 4. 配置上游 API Key
-
-编辑 `src/DesensitizeProxy.AspNetCore/appsettings.json`，或设置环境变量：
-
-```bash
-export OPENAI_API_KEY="sk-你的key"
-```
-
-#### 5. 运行
-
-```bash
-# 开发模式
-dotnet run --project src/DesensitizeProxy.AspNetCore
-
-# 或者先发布再运行
-dotnet publish src/DesensitizeProxy.AspNetCore \
-  -c Release -r osx-arm64 --self-contained false \
-  -o artifacts/publish/osx-arm64
-
-./artifacts/publish/osx-arm64/DesensitizeProxy.AspNetCore
-```
-
-#### 6. 设为 launchd 服务（开机自启）
-
-```bash
-# 复制发布产物
-sudo mkdir -p /usr/local/share/desensitize-proxy
-sudo cp -r artifacts/publish/osx-arm64/* /usr/local/share/desensitize-proxy/
-
-# 安装 plist
-sudo cp deploy/launchd/com.clawxrouter.privacy-proxy.plist /Library/LaunchDaemons/
-sudo launchctl load /Library/LaunchDaemons/com.clawxrouter.privacy-proxy.plist
-
-# 验证
-sudo launchctl list | grep clawxrouter
-```
-
-数据目录：`~/Library/Application Support/ClawXRouter/PrivacyProxy/`
-日志目录：未配置 `Runtime.LogDirectory` 时为 `DesensitizeProxy.AspNetCore.dll` 所在目录；显式配置后使用配置目录。
-
----
-
-### Linux
-
-#### 1. 安装 .NET 10 SDK
-
-```bash
-# Ubuntu / Debian
-wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-sudo dpkg -i packages-microsoft-prod.deb
-sudo apt-get update
-sudo apt-get install -y dotnet-sdk-10.0
-
-# RHEL / Fedora
-sudo dnf install dotnet-sdk-10.0
-
-# 验证
-dotnet --version
-```
-
-#### 2. 安装 Ollama（可选）
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 拉取模型
-ollama pull openbmb/minicpm4.1
-```
-
-#### 3. 克隆 & 构建
-
-```bash
-git clone <repo-url> && cd locrouter
-
-dotnet restore
-dotnet build -c Release
-```
-
-#### 4. 配置环境变量
-
-```bash
-# 创建环境变量文件
-sudo mkdir -p /etc
-sudo tee /etc/desensitize-proxy.env << 'EOF'
-OPENAI_API_KEY=sk-你的key
-EOF
-```
-
-#### 5. 发布 & 部署
-
-```bash
-# 发布
-dotnet publish src/DesensitizeProxy.AspNetCore \
-  -c Release -r linux-x64 --self-contained false \
-  -o artifacts/publish/linux-x64
-
-# 部署到 /opt
-sudo mkdir -p /opt/desensitize-proxy
-sudo cp -r artifacts/publish/linux-x64/* /opt/desensitize-proxy/
-```
-
-#### 6. 设为 systemd 服务（开机自启）
-
-```bash
-# 安装 service 文件
-sudo cp deploy/systemd/desensitize-proxy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable desensitize-proxy
-sudo systemctl start desensitize-proxy
-
-# 验证
-sudo systemctl status desensitize-proxy
-```
-
-数据目录：`~/.local/share/clawxrouter/privacy-proxy/`
-日志目录：未配置 `Runtime.LogDirectory` 时为 `DesensitizeProxy.AspNetCore.dll` 所在目录；显式配置后使用配置目录。
-
----
-
-### Windows
-
-#### 1. 安装 .NET 10 SDK
-
-从 [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0) 下载安装程序，或使用 winget：
-
-```powershell
-winget install Microsoft.DotNet.SDK.10
-
-# 验证
-dotnet --version
-```
-
-#### 2. 安装 Ollama（可选）
-
-从 [ollama.com](https://ollama.com/download/windows) 下载安装程序。
-
-```powershell
-ollama pull openbmb/minicpm4.1
-```
-
-#### 3. 克隆 & 构建
-
-```powershell
-git clone <repo-url>; cd locrouter
-
-dotnet restore
-dotnet build -c Release
-```
-
-#### 4. 设置环境变量
-
-```powershell
-# 当前会话
-$env:OPENAI_API_KEY = "sk-你的key"
-
-# 永久设置（需管理员）
-[System.Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "sk-你的key", "User")
-```
-
-#### 5. 运行
-
-```powershell
-# 开发模式
-dotnet run --project src/DesensitizeProxy.AspNetCore
-```
-
-#### 6. 发布 & 安装为 Windows Service
-
-```powershell
-# 发布
-dotnet publish src/DesensitizeProxy.AspNetCore `
-  -c Release -r win-x64 --self-contained false `
-  -o artifacts/publish/win-x64
-
-# 安装为 Windows Service（需管理员）
-$InstallDir = "$env:ProgramFiles\DesensitizeProxy"
-Copy-Item -Recurse artifacts/publish/win-x64 $InstallDir
-& deploy/windows/install-service.ps1 -InstallDir $InstallDir
-
-# 验证
-Get-Service DesensitizePrivacyProxy
-```
-
-数据目录：`%LocalAppData%\ClawXRouter\PrivacyProxy\`
-日志目录：未配置 `Runtime.LogDirectory` 时为 `DesensitizeProxy.AspNetCore.dll` 所在目录；显式配置后使用配置目录。
-
----
-
-### Docker
-
-#### 1. 构建镜像
-
-```bash
+git clone <repo-url>
 cd locrouter
-docker build -t desensitize-proxy .
+
+dotnet restore
+dotnet build -c Release
 ```
 
-#### 2. 运行容器
+Configure the upstream target through environment variables:
 
 ```bash
-# 创建本地数据目录
-mkdir -p deploy/data deploy/logs deploy/prompts
-
-# 运行
-docker run -d \
-  --name desensitize-proxy \
-  -p 127.0.0.1:8403:8403 \
-  -e OPENAI_API_KEY="sk-你的key" \
-  -e PrivacyProxy__Proxy__BindAddress=0.0.0.0 \
-  -v $(pwd)/deploy/data:/data \
-  -v $(pwd)/deploy/logs:/logs \
-  desensitize-proxy
-```
-
-#### 3. 使用 Docker Compose
-
-```bash
-# 先设环境变量
-export OPENAI_API_KEY="sk-你的key"
-
-# 启动
-docker compose -f deploy/docker-compose.yml up -d
-
-# 查看日志
-docker compose -f deploy/docker-compose.yml logs -f
-```
-
-#### Docker 中使用宿主机 Ollama
-
-如果 Ollama 跑在宿主机上，容器内需要这样访问：
-
-```yaml
-# docker-compose.yml
-environment:
-  PrivacyProxy__LocalModel__Endpoint: "http://host.docker.internal:11434"
-```
-
-或者在 Linux 下使用 `--network host`：
-
-```bash
-docker run --network host \
-  -e PrivacyProxy__LocalModel__Endpoint=http://localhost:11434 \
-  ...
-```
-
----
-
-## 配置说明
-
-完整配置位于 `src/DesensitizeProxy.AspNetCore/appsettings.json`，节点路径为 `PrivacyProxy`。所有配置支持热更新（通过 `IOptionsMonitor`）和环境变量覆盖（`PrivacyProxy__Section__Key` 格式）。
-
-### 顶层开关
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `Enabled` | bool | `true` | 总开关，`false` 时直通不脱敏 |
-| `StrictMode` | bool | `false` | 严格模式：LLM 脱敏失败时阻断请求 (502) 而非降级转发。即使 `LocalModel.Enabled=false`，StrictMode 下命中 Trigger/Hint 也会阻断 |
-| `PromptPath` | string? | `null` | 自定义脱敏 Prompt 路径；`null` 使用内置默认 |
-| `MaxBodySizeBytes` | long | `16777216` | 请求体大小上限 (16MiB) |
-| `MaxTextPartLengthForLlm` | int | `8000` | 送入 LLM 脱敏的单段文本字符数上限 |
-
-### LocalModel — 本地脱敏 LLM
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `Enabled` | bool | `false` | 是否启用 LLM 语义脱敏。`false` = 纯 Regex（默认，推荐先确保 Regex 链路正常后再开启） |
-| `Type` | string | `"openai-compatible"` | 协议类型：`"openai-compatible"` / `"ollama-native"` / `"custom"` |
-| `Provider` | string | `"ollama"` | 模型提供商标识 |
-| `Model` | string | `"openbmb/minicpm4.1"` | 模型名称 |
-| `Endpoint` | string | `"http://localhost:11434"` | LLM 服务地址 |
-| `ApiKey` | string? | `null` | API Key（Ollama 通常无需） |
-| `TimeoutMs` | int | `5000` | 单条脱敏超时 (ms) |
-| `MaxConcurrency` | int | `4` | 并发脱敏上限 |
-
-### Keywords — 规则引擎关键词
-
-| 配置项 | 类型 | 说明 |
-|--------|------|------|
-| `TriggerKeywords` | string[] | 强信号（短语级），命中后必定追加 LLM 脱敏 |
-| `HintKeywords` | string[] | 弱信号（单词级），需结合 Regex 命中判定 |
-
-### Redaction — Regex 脱敏开关
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `ChinesePhone` | bool | `true` | 中国手机号 |
-| `ChineseId` | bool | `true` | 中国身份证号 |
-| `Email` | bool | `true` | 邮箱地址 |
-| `InternalIp` | bool | `false` | 内网 IP |
-| `CreditCard` | bool | `false` | 信用卡号 |
-| `ChineseAddress` | bool | `false` | 中文地址 |
-| `EnvVar` | bool | `false` | 环境变量值泄漏检测 |
-
-Phase 1（硬编码）**始终运行**，不可关闭：SSH 私钥块、AWS Key、DB 连接串、快递单号、门禁密码。
-
-### SystemMessageRedaction — System Prompt 脱敏
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `Phase1` | bool | `true` | 硬编码 Regex 对 system 运行 |
-| `Phase2` | bool | `true` | 可配 Regex 对 system 运行 |
-| `Phase3` | bool | `false` | 上下文关键词 Regex 对 system 运行 |
-| `RuleEngine` | bool | `false` | 规则引擎判定对 system 运行 |
-| `Llm` | bool | `false` | LLM 语义脱敏对 system 运行 |
-
-### Observability — 观测与脱敏审计日志
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `MetricsEnabled` | bool | `true` | 是否启用指标采集 |
-| `HealthCheckEnabled` | bool | `true` | 是否启用健康检查端点 |
-| `HealthCheckPath` | string | `"/health"` | 健康检查路径 |
-| `RedactionLoggingEnabled` | bool | `true` | 是否记录每次脱敏命中。打开后写入 `Runtime.LogDirectory/log/redactions-yyyy-MM-dd.log`，每行一条 JSON |
-| `RedactionLogIncludeValues` | bool | `true` | 是否把原始敏感值写入日志。默认开启后审计文件包含原值，需要按敏感日志保管 |
-
-脱敏审计日志固定写入 `Runtime.LogDirectory/log/redactions-yyyy-MM-dd.log`。如果未配置 `Runtime.LogDirectory`，则写入 `DesensitizeProxy.AspNetCore.dll` 所在目录下的 `log/redactions-yyyy-MM-dd.log`。文件名日期和 `timestamp` 均使用北京时间 (`+08:00`)。文件格式为 JSON Lines，字段包括 `timestamp`、`source`、`path`、`isSystem`、`phase`、`label`、`count`、`originalValue`、`redactedValue`。
-
-### Proxy — 上游转发目标
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `Port` | int | `8403` | 代理监听端口 |
-| `BindAddress` | string | `"127.0.0.1"` | 绑定地址 |
-| `DefaultTarget` | string? | `null` | 默认上游目标 key。请求协议没有匹配到 target 时使用 |
-| `Targets` | dict | `{}` | 上游目标字典。推荐一个协议一个 target，例如 `openai` / `anthropic` / `gemini` |
-| `Targets[].BaseUrl` | string | (必填) | 上游 API 地址 |
-| `Targets[].ApiKey` | string | (必填) | API Key，支持 `${ENV_VAR}` 占位符 |
-| `Targets[].Provider` | string? | — | 协议类型：`"openai"` / `"openai-compatible"` / `"anthropic"` / `"google"` / `"gemini"` / `"vertex"` |
-
-上游选择规则：先根据客户端请求协议/路径匹配 target；没有匹配到协议 target 时使用 `DefaultTarget`。`model` 字段只作为转发给上游的模型名，不用于选择 target。
-
-### 环境变量覆盖
-
-ASP.NET Core Options 模式支持通过环境变量覆盖任意配置项，使用 `__`（双下划线）分隔层级：
-
-```bash
-export PrivacyProxy__Enabled=true
-export PrivacyProxy__LocalModel__Endpoint=http://localhost:11435
-export PrivacyProxy__Proxy__Port=8403
 export PrivacyProxy__Proxy__DefaultTarget=openai
-export PrivacyProxy__Proxy__Targets__openai__ApiKey=sk-xxx
-export PrivacyProxy__Proxy__Targets__gemini__ApiKey=your-gemini-key
-export PrivacyProxy__Observability__RedactionLoggingEnabled=true
-# 谨慎使用：true 会把原始敏感值写入 log/redactions-yyyy-MM-dd.log
-export PrivacyProxy__Observability__RedactionLogIncludeValues=true
+export PrivacyProxy__Proxy__Targets__openai__BaseUrl=https://api.openai.com/v1
+export PrivacyProxy__Proxy__Targets__openai__ApiKey="$OPENAI_API_KEY"
+export PrivacyProxy__Proxy__Targets__openai__Provider=openai
 ```
 
----
-
-## 使用示例
-
-### 基本使用
-
-代理启动后监听 `http://127.0.0.1:8403`，客户端只需把请求指向代理即可：
+If you do not want semantic redaction during local testing, disable the local model:
 
 ```bash
-# 通过代理调用 OpenAI
-curl http://127.0.0.1:8403/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [
-      {"role": "user", "content": "你好，我叫张三，手机号13912345678，地址是北京市朝阳区xx路xx号"}
-    ]
-  }'
+export PrivacyProxy__LocalModel__Enabled=false
 ```
 
-代理会将请求中的 PII 替换后转发到上游：
+Start the proxy:
 
+```bash
+dotnet run --project src/DesensitizeProxy.AspNetCore
 ```
-实际转发内容:
-"你好，我叫[REDACTED:NAME]，手机号[REDACTED:PHONE]，地址是[REDACTED:ADDRESS]"
+
+The proxy listens on `http://127.0.0.1:8403` by default.
+
+### Run with Docker Compose
+
+```bash
+export OPENAI_API_KEY="sk-your-key"
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
-### 按协议配置上游
+Docker Compose publishes the proxy at `127.0.0.1:8403` and mounts local `deploy/data`, `deploy/logs`, and `deploy/prompts` directories.
 
-一个协议配置一个 target 即可。代理先根据请求协议选择 target；匹配不到时回退到 `DefaultTarget`。客户端请求体里的 `model` 会原样传给上游，不会被配置覆盖，也不会用来选择 target。
+## How It Works
+
+```text
+Incoming request
+  |
+  |-- Extract text parts from chat / responses / provider-native JSON
+  |-- Phase 1 Regex: built-in high-confidence secrets, always enabled
+  |-- Phase 2 Regex: configurable common PII, enabled by default
+  |-- Phase 3 Regex: context-keyword rules, skips code fences
+  |-- Rule engine: Trigger / Hint / None on original text
+  |-- Local LLM redaction when required and enabled
+  |-- Regex fallback on LLM output
+  |-- Schema cleanup and provider transform
+  v
+Forward to upstream provider through YARP
+```
+
+The proxy never stores conversations or generates answers locally. Its job is limited to request-body redaction, provider-specific transformation, authentication header injection, and forwarding.
+
+## Configuration
+
+All options live under the `PrivacyProxy` section in `src/DesensitizeProxy.AspNetCore/appsettings.json`. ASP.NET Core environment variable overrides use double underscores, for example `PrivacyProxy__Proxy__Port=8403`.
+
+### Minimal upstream target
 
 ```json
 {
-  "Proxy": {
-    "DefaultTarget": "openai",
-    "Targets": {
-      "openai": {
-        "BaseUrl": "https://api.openai.com/v1",
-        "ApiKey": "${OPENAI_API_KEY}",
-        "Provider": "openai"
-      },
-      "anthropic": {
-        "BaseUrl": "https://api.anthropic.com/v1",
-        "ApiKey": "${ANTHROPIC_API_KEY}",
-        "Provider": "anthropic"
-      },
-      "gemini": {
-        "BaseUrl": "https://generativelanguage.googleapis.com",
-        "ApiKey": "${GEMINI_API_KEY}",
-        "Provider": "gemini"
-      },
-      "openai-compatible-gateway": {
-        "BaseUrl": "https://your-gateway.example.com/v1",
-        "ApiKey": "${GATEWAY_API_KEY}",
-        "Provider": "openai-compatible"
+  "PrivacyProxy": {
+    "Proxy": {
+      "Port": 8403,
+      "BindAddress": "127.0.0.1",
+      "DefaultTarget": "openai",
+      "Targets": {
+        "openai": {
+          "BaseUrl": "https://api.openai.com/v1",
+          "ApiKey": "${OPENAI_API_KEY}",
+          "Provider": "openai"
+        }
       }
     }
   }
 }
 ```
 
-- OpenAI-compatible 请求（例如 `/v1/responses`、`/v1/chat/completions`）→ 匹配 `Provider: "openai"` 或 `"openai-compatible"`
-- Anthropic 原生请求（例如 `/v1/messages`）→ 匹配 `Provider: "anthropic"`
-- Gemini / Vertex 原生请求（例如 `generateContent` 或 body 含 `contents` / `systemInstruction`）→ 匹配 `Provider: "gemini"` / `"google"` / `"vertex"`
-- 协议没有匹配到任何 target → 使用 `DefaultTarget`
+### Common options
 
-### Gemini 原生路径
+| Option | Default | Description |
+|---|---:|---|
+| `Enabled` | `true` | Global switch. When disabled, requests pass through without redaction. |
+| `StrictMode` | `false` | Blocks requests when semantic redaction is required but cannot complete. |
+| `PromptPath` | `null` | Optional custom prompt path for PII extraction. |
+| `MaxBodySizeBytes` | `16777216` | Maximum request body size, 16 MiB by default. |
+| `MaxTextPartLengthForLlm` | `8000` | Maximum single text part length sent to the local model. |
+| `LocalModel.Enabled` | `true` | Enables semantic redaction through the configured local model. |
+| `LocalModel.Endpoint` | `http://localhost:11434` | Local model endpoint. |
+| `LocalModel.Model` | `openbmb/minicpm4.1` | Model name sent to the local model endpoint. |
+| `Proxy.Port` | `8403` | Local proxy port. |
+| `Proxy.BindAddress` | `127.0.0.1` | Local bind address. |
+| `Observability.HealthCheckPath` | `/health` | Health check endpoint. |
 
-Gemini 只有在客户端使用 Gemini 原生路径或 Gemini 原生 body 时才会走 `gemini` target。下面的请求会匹配 `Provider: "gemini"`：
+### Redaction switches
+
+```json
+{
+  "PrivacyProxy": {
+    "Redaction": {
+      "ChinesePhone": true,
+      "ChineseId": true,
+      "Email": true,
+      "InternalIp": false,
+      "CreditCard": false,
+      "ChineseAddress": false,
+      "EnvVar": false
+    }
+  }
+}
+```
+
+Phase 1 built-in rules are not configurable and always run. They cover low-false-positive secrets such as private key blocks, cloud access keys, database connection strings, delivery tracking numbers, and access codes.
+
+### Local model
+
+Ollama example:
 
 ```bash
-curl http://127.0.0.1:8403/v1beta/models/gemini-2.5-flash:generateContent \
+ollama serve
+ollama pull openbmb/minicpm4.1
+
+export PrivacyProxy__LocalModel__Enabled=true
+export PrivacyProxy__LocalModel__Type=openai-compatible
+export PrivacyProxy__LocalModel__Provider=ollama
+export PrivacyProxy__LocalModel__Endpoint=http://localhost:11434
+export PrivacyProxy__LocalModel__Model=openbmb/minicpm4.1
+```
+
+Regex-only mode:
+
+```bash
+export PrivacyProxy__LocalModel__Enabled=false
+```
+
+Strict mode:
+
+```bash
+export PrivacyProxy__StrictMode=true
+```
+
+## Usage
+
+Point your LLM client at the proxy instead of the upstream provider.
+
+```bash
+curl http://127.0.0.1:8403/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "contents": [{"parts": [{"text": "我的手机号是13912345678"}]}]
+    "model": "gpt-4o-mini",
+    "messages": [
+      {
+        "role": "user",
+        "content": "我叫张三，手机号 13912345678，邮箱 zhangsan@example.com。"
+      }
+    ]
   }'
 ```
 
-如果客户端仍使用 OpenAI-compatible 请求格式，只是把 `model` 写成 Gemini 模型名，代理会按 OpenAI-compatible 协议选择 `openai` / `openai-compatible` target，不会走 `gemini` target。
+The upstream receives redacted content similar to:
 
-### 模型列表和无请求体接口
+```text
+我叫[REDACTED:NAME]，手机号 [REDACTED:PHONE]，邮箱 [REDACTED:EMAIL]。
+```
 
-`GET /v1/models`、`GET /v1beta/models` 这类没有 JSON body 的控制类接口不会进入脱敏流程，代理会按协议选择 target 后直接转发，并自动补上配置中的上游鉴权头。
+Control-plane endpoints without JSON request bodies, such as `GET /v1/models`, bypass redaction and are forwarded with the configured upstream authentication.
 
 ```bash
 curl http://127.0.0.1:8403/v1/models
 ```
 
-这个请求会匹配 OpenAI-compatible 协议，转发到 `Provider: "openai"` 或 `"openai-compatible"` 的 target。
+## Provider Routing
 
----
+The proxy selects an upstream target from the request protocol and path. The `model` field is forwarded to the upstream provider, but it is not used as a target key.
 
-## 健康检查 & 可观测性
+```json
+{
+  "PrivacyProxy": {
+    "Proxy": {
+      "DefaultTarget": "openai",
+      "Targets": {
+        "openai": {
+          "BaseUrl": "https://api.openai.com/v1",
+          "ApiKey": "${OPENAI_API_KEY}",
+          "Provider": "openai"
+        },
+        "anthropic": {
+          "BaseUrl": "https://api.anthropic.com/v1",
+          "ApiKey": "${ANTHROPIC_API_KEY}",
+          "Provider": "anthropic"
+        },
+        "gemini": {
+          "BaseUrl": "https://generativelanguage.googleapis.com",
+          "ApiKey": "${GEMINI_API_KEY}",
+          "Provider": "gemini"
+        }
+      }
+    }
+  }
+}
+```
 
-### 健康检查
+Routing rules:
+
+- OpenAI-compatible paths such as `/v1/chat/completions` and `/v1/responses` match `openai` or `openai-compatible` targets.
+- Anthropic native paths such as `/v1/messages` match `anthropic` targets.
+- Gemini native paths such as `/v1beta/models/gemini-2.5-flash:generateContent` match `gemini`, `google`, or `vertex` targets.
+- When no protocol-specific target matches, `DefaultTarget` is used.
+
+Gemini native example:
+
+```bash
+curl http://127.0.0.1:8403/v1beta/models/gemini-2.5-flash:generateContent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {"parts": [{"text": "我的手机号是 13912345678"}]}
+    ]
+  }'
+```
+
+## Health and Observability
+
+### Health check
 
 ```bash
 curl http://127.0.0.1:8403/health
 ```
 
-响应示例：
+Healthy response example:
 
 ```json
-// 正常
 {
   "status": "healthy",
   "regex": "ok",
@@ -567,186 +295,125 @@ curl http://127.0.0.1:8403/health
   "llm_model": "openbmb/minicpm4.1",
   "cache_entries": 42
 }
-
-// LLM 不可用
-{
-  "status": "degraded",
-  "regex": "ok",
-  "llm": "timeout",
-  "llm_endpoint": "http://localhost:11434"
-}
 ```
+
+When the local model is disabled or unavailable, health can become degraded while Regex redaction remains available.
 
 ### Metrics
 
-代理提供以下 Prometheus 风格指标：
+The built-in metrics collector tracks:
 
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `desensitize_requests_total` | Counter | 总请求数 |
-| `regex_hits_total` | Counter | Regex 命中次数 (label: `phase`) |
-| `llm_desensitize_calls_total` | Counter | LLM 脱敏调用次数 |
-| `llm_desensitize_duration_seconds` | Histogram | LLM 脱敏耗时分布 |
-| `llm_failures_total` | Counter | LLM 脱敏失败次数 (label: `reason`) |
-| `llm_cache_hits_total` | Counter | 缓存命中次数 |
-| `strict_mode_blocks_total` | Counter | StrictMode 阻断次数 |
+| Metric | Type | Description |
+|---|---|---|
+| `desensitize_requests_total` | Counter | Total proxied requests. |
+| `regex_hits_total` | Counter | Regex hits, tagged by phase. |
+| `llm_desensitize_calls_total` | Counter | Local model redaction calls. |
+| `llm_desensitize_duration_seconds` | Histogram | Local model redaction latency. |
+| `llm_failures_total` | Counter | Local model failures, tagged by reason. |
+| `llm_cache_hits_total` | Counter | Semantic redaction cache hits. |
+| `strict_mode_blocks_total` | Counter | Requests blocked by StrictMode. |
 
----
+### Redaction audit log
 
-## 编译 & 发布
+When `PrivacyProxy__Observability__RedactionLoggingEnabled=true`, audit entries are written as JSON Lines to:
 
-### 编译
-
-```bash
-# 还原 + 编译
-dotnet restore
-dotnet build -c Release
-
-# 运行测试
-dotnet test
+```text
+<Runtime.LogDirectory>/log/redactions-yyyy-MM-dd.log
 ```
 
-### 单平台发布
+Set `PrivacyProxy__Observability__RedactionLogIncludeValues=false` if audit logs must not contain original sensitive values.
+
+## Deployment
+
+### Publish one platform
 
 ```bash
-# macOS ARM (M 系列)
 dotnet publish src/DesensitizeProxy.AspNetCore \
-  -c Release -r osx-arm64 --self-contained false \
-  -o artifacts/publish/osx-arm64
-
-# macOS x64
-dotnet publish src/DesensitizeProxy.AspNetCore \
-  -c Release -r osx-x64 --self-contained false \
-  -o artifacts/publish/osx-x64
-
-# Linux x64
-dotnet publish src/DesensitizeProxy.AspNetCore \
-  -c Release -r linux-x64 --self-contained false \
+  -c Release \
+  -r linux-x64 \
+  --self-contained false \
   -o artifacts/publish/linux-x64
-
-# Windows x64
-dotnet publish src/DesensitizeProxy.AspNetCore \
-  -c Release -r win-x64 --self-contained false \
-  -o artifacts/publish/win-x64
 ```
 
-### 全平台批量发布
+Supported publish targets include `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64`, `win-x64`, and `win-arm64`.
+
+### Publish all platforms
 
 ```bash
 bash scripts/publish-all.sh
 ```
 
-产物输出在 `artifacts/publish/` 下按 RID 分目录：
-`osx-arm64` | `osx-x64` | `linux-x64` | `linux-arm64` | `win-x64` | `win-arm64`
+### Docker
 
----
+```bash
+docker build -t desensitize-proxy .
 
-## 常用场景配置
-
-### 仅 Regex 脱敏（不跑本地 LLM）
-
-```json
-{
-  "LocalModel": {
-    "Enabled": false
-  }
-}
+docker run -d \
+  --name desensitize-proxy \
+  -p 127.0.0.1:8403:8403 \
+  -e PrivacyProxy__Proxy__BindAddress=0.0.0.0 \
+  -e PrivacyProxy__Proxy__Targets__openai__BaseUrl=https://api.openai.com/v1 \
+  -e PrivacyProxy__Proxy__Targets__openai__ApiKey="$OPENAI_API_KEY" \
+  -e PrivacyProxy__Proxy__Targets__openai__Provider=openai \
+  desensitize-proxy
 ```
 
-### 高安全要求（脱敏失败即阻断）
+If Ollama runs on the host and the proxy runs in Docker, set the local model endpoint to `http://host.docker.internal:11434` on Docker Desktop. On Linux, use a reachable host address or host networking.
 
-```json
-{
-  "StrictMode": true
-}
+### Services
+
+Service templates are included under `deploy/`:
+
+- `deploy/systemd/desensitize-proxy.service` for Linux systemd
+- `deploy/launchd/com.clawxrouter.privacy-proxy.plist` for macOS launchd
+- `deploy/windows/install-service.ps1` for Windows Service installation
+
+Runtime directories are platform-specific by default and can be overridden with `PrivacyProxy__Runtime__DataDirectory` and `PrivacyProxy__Runtime__LogDirectory`.
+
+## Development
+
+```bash
+# Restore and build
+dotnet restore
+dotnet build DesensitizeProxy.slnx
+
+# Run tests
+dotnet test tests/DesensitizeProxy.Core.Tests/DesensitizeProxy.Core.Tests.csproj
+
+# Run the web host on a temporary port
+PrivacyProxy__Proxy__Port=18403 \
+PrivacyProxy__LocalModel__Enabled=false \
+dotnet run --project src/DesensitizeProxy.AspNetCore
 ```
 
-### 使用不同的 Ollama 模型
+Useful docs:
 
-```json
-{
-  "LocalModel": {
-    "Model": "qwen2.5:0.5b",
-    "Endpoint": "http://localhost:11434"
-  }
-}
-```
+- [Detailed design](docs/dotnet-privacy-router-design-final.md)
+- [Implementation audit](docs/implementation-audit.md)
 
-### 自定义脱敏 Prompt
+## Project Structure
 
-```json
-{
-  "PromptPath": "/path/to/your/pii-extraction.md"
-}
-```
-
-Prompt 优先级：配置绝对路径 > `{ContentRoot}/prompts/pii-extraction.md` > 内置默认。
-
-### 增加额外触发关键词
-
-```json
-{
-  "Keywords": {
-    "TriggerKeywords": [
-      "自定义敏感词", "工号", "车牌号",
-      "...以及其他默认 Trigger 关键词..."
-    ]
-  }
-}
-```
-
----
-
-## 项目结构
-
-```
+```text
 locrouter/
-├── DesensitizeProxy.slnx               # 解决方案文件
-├── Dockerfile                          # Docker 镜像构建
-├── README.md
-├── deploy/
-│   ├── docker-compose.yml              # Docker Compose 编排
-│   ├── launchd/
-│   │   └── com.clawxrouter.privacy-proxy.plist   # macOS 服务
-│   ├── systemd/
-│   │   └── desensitize-proxy.service              # Linux systemd
-│   └── windows/
-│       └── install-service.ps1                    # Windows Service
-├── docs/
-│   └── dotnet-privacy-router-design-final.md      # 详细设计文档
-├── scripts/
-│   └── publish-all.sh                  # 全平台批量发布
 ├── src/
-│   ├── DesensitizeProxy.Core/          # 核心逻辑
-│   │   ├── Abstractions/               # 接口定义
-│   │   ├── Engine/                     # Regex 引擎 & 规则引擎
-│   │   ├── Llm/                        # LLM 脱敏 & 缓存 & Prompt
-│   │   ├── Models/                     # 配置 & 结果模型
-│   │   ├── Redaction/                  # PII 脱敏 & Schema 清洗
-│   │   ├── Runtime/                    # 跨平台目录解析
-│   │   └── Extensions/                 # DI 注册
-│   └── DesensitizeProxy.AspNetCore/    # ASP.NET Core 宿主
-│       ├── Auth/                       # Multi-auth 鉴权
-│       ├── Health/                     # 健康检查端点
-│       ├── Middleware/                  # 主中间件 & 文本抽取
-│       ├── Yarp/                       # YARP 转发 & Provider 转换
-│       ├── appsettings.json            # 默认配置
-│       └── Program.cs                  # 入口
-└── tests/
-    └── DesensitizeProxy.Core.Tests/    # 单元测试 & 集成测试
+│   ├── DesensitizeProxy.AspNetCore/   # ASP.NET Core host, middleware, health, YARP forwarding
+│   └── DesensitizeProxy.Core/         # Redaction engine, rule engine, local LLM client, models
+├── tests/                             # Unit and integration tests
+├── deploy/                            # Docker Compose and service templates
+├── docs/                              # Design and implementation notes
+├── scripts/                           # Release helpers
+├── Dockerfile
+├── DesensitizeProxy.slnx
+└── README.md
 ```
 
----
+## Security Notes
 
-## 失败降级矩阵
+- Do not commit real upstream API keys. Prefer environment variables or a local secrets manager.
+- Treat redaction audit logs as sensitive if `RedactionLogIncludeValues=true`.
+- `StrictMode=false` favors availability. Use `StrictMode=true` when forwarding imperfectly redacted text is unacceptable.
+- Run the proxy on `127.0.0.1` unless it is intentionally exposed behind your own access controls.
 
-| 场景 | Regex 命中 | LLM 可用 | StrictMode=false | StrictMode=true |
-|------|-----------|---------|------------------|-----------------|
-| 常规请求 | ✅ / ❌ | ✅ | 正常脱敏转发 | 正常脱敏转发 |
-| LLM 挂了 | ✅ | ❌ | Regex-only 转发 + 告警 ✅ | 命中 Trigger/Hint → 502 ❌ |
-| LLM 挂了 + 无 Regex | ❌ | ❌ | 转发 + 高优告警 | 命中 Trigger/Hint → 502 ❌ |
-| LLM 超时 | ✅ / ❌ | 部分 | Regex-only 转发 | 命中 Trigger/Hint → 502 |
-| 本地模型禁用 | ✅ / ❌ | 主动关 | Regex-only 转发 | 命中 Trigger/Hint → 502 |
-| 文本超长 | ✅ | — | Regex-only 转发 + 告警 | 命中 Trigger/Hint → 413 |
+## License
 
-默认 **StrictMode=false**，推荐生产环境使用。
+This project is licensed under the [MIT License](LICENSE).
