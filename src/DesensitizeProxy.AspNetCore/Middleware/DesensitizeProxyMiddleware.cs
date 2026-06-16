@@ -147,7 +147,7 @@ public sealed class DesensitizeProxyMiddleware : IMiddleware
         }
 
         var providerTransformer = _providerTransformers.Resolve(target);
-        var outboundBody = providerTransformer.TransformRequest(parsed, target).ToJsonString();
+        var outboundBody = providerTransformer.TransformRequest(context.Request.Path, parsed, target).ToJsonString();
         ReplaceRequestBody(context, outboundBody);
 
         var transformer = new DesensitizeForwarderTransformer(parsed, target, providerTransformer);

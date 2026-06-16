@@ -83,6 +83,23 @@ public sealed class UpstreamResolverTests
     }
 
     [Fact]
+    public void Resolve_UsesDeepSeekEndpointConfiguredAsOpenAiCompatibleTarget()
+    {
+        var config = ConfigWithTargets();
+        config.Proxy.Targets.Remove("openai");
+        config.Proxy.Targets["external"] = new UpstreamTarget
+        {
+            BaseUrl = "https://api.deepseek.com/v1",
+            ApiKey = "deepseek-key",
+            Provider = "openai-compatible"
+        };
+
+        var target = Resolve("/v1/responses", """{"model":"deepseek-reasoner","input":"hello"}""", config);
+
+        Assert.Equal("https://api.deepseek.com/v1", target.BaseUrl);
+    }
+
+    [Fact]
     public void Resolve_UsesSingleTargetWhenProtocolUnknownAndNoDefaultExists()
     {
         var config = new PrivacyConfig
