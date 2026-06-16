@@ -87,8 +87,7 @@ public sealed class UpstreamResolver
         return protocol switch
         {
             "openai" => provider.Equals("openai", StringComparison.OrdinalIgnoreCase) ||
-                        provider.Equals("openai-compatible", StringComparison.OrdinalIgnoreCase) ||
-                        provider.Equals("deepseek", StringComparison.OrdinalIgnoreCase),
+                        provider.Equals("openai-compatible", StringComparison.OrdinalIgnoreCase),
             "anthropic" => provider.Equals("anthropic", StringComparison.OrdinalIgnoreCase),
             "gemini" => provider.Equals("gemini", StringComparison.OrdinalIgnoreCase) ||
                         provider.Equals("google", StringComparison.OrdinalIgnoreCase) ||

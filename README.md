@@ -242,11 +242,6 @@ The proxy selects an upstream target from the request protocol and path. The `mo
           "ApiKey": "${OPENAI_API_KEY}",
           "Provider": "openai"
         },
-        "deepseek": {
-          "BaseUrl": "https://api.deepseek.com/v1",
-          "ApiKey": "${DEEPSEEK_API_KEY}",
-          "Provider": "deepseek"
-        },
         "anthropic": {
           "BaseUrl": "https://api.anthropic.com/v1",
           "ApiKey": "${ANTHROPIC_API_KEY}",
@@ -265,11 +260,26 @@ The proxy selects an upstream target from the request protocol and path. The `mo
 
 Routing rules:
 
-- OpenAI-compatible paths such as `/v1/chat/completions` and `/v1/responses` match `openai`, `openai-compatible`, or `deepseek` targets.
-- DeepSeek targets use Bearer authentication and forward Chat Completions requests as-is. For `/v1/responses`, the request body is converted to `/chat/completions` shape before forwarding, including `thinking.type`, `reasoning_effort`, and tool-call `reasoning_content` carry-over required by DeepSeek thinking mode; responses remain upstream-native.
+- OpenAI-compatible paths such as `/v1/chat/completions` and `/v1/responses` match targets whose provider is `openai` or `openai-compatible`.
+- DeepSeek-compatible endpoints should be configured as OpenAI-compatible targets. Official DeepSeek hosts enable Responses-to-Chat-Completions compatibility automatically. Multi-model gateways can enable it per model with `ResponsesCompatibilityRules`, for example `{ "ModelPattern": "deepseek-*", "Mode": "deepseek-chat-completions" }`. Non-matching models stay native, so switching models in Codex or Claude Code does not require changing proxy config.
 - Anthropic native paths such as `/v1/messages` match `anthropic` targets.
 - Gemini native paths such as `/v1beta/models/gemini-2.5-flash:generateContent` match `gemini`, `google`, or `vertex` targets.
 - When no protocol-specific target matches, `DefaultTarget` is used.
+
+OpenAI-compatible multi-model gateway example:
+
+```json
+{
+  "BaseUrl": "https://gateway.example/v1",
+  "ApiKey": "${GATEWAY_API_KEY}",
+  "Provider": "openai-compatible",
+  "ResponsesCompatibility": "native",
+  "ResponsesCompatibilityRules": [
+    { "ModelPattern": "deepseek-*", "Mode": "deepseek-chat-completions" },
+    { "ModelPattern": "deepseek/*", "Mode": "deepseek-chat-completions" }
+  ]
+}
+```
 
 Gemini native example:
 

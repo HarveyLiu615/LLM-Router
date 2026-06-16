@@ -19,13 +19,13 @@ public sealed class MultiAuthHandlerTests
     }
 
     [Fact]
-    public void ResolveAuthHeaders_UsesBearerForDeepSeek()
+    public void ResolveAuthHeaders_UsesBearerForDeepSeekEndpointConfiguredAsOpenAiCompatible()
     {
         var headers = MultiAuthHandler.ResolveAuthHeaders(new UpstreamTarget
         {
             BaseUrl = "https://api.deepseek.com/v1",
             ApiKey = "key",
-            Provider = "deepseek"
+            Provider = "openai-compatible"
         });
 
         Assert.Equal("Bearer key", headers["Authorization"]);

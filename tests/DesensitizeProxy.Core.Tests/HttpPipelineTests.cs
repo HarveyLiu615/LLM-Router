@@ -100,7 +100,7 @@ public sealed class HttpPipelineTests
     }
 
     [Fact]
-    public async Task Middleware_ConvertsResponsesRequestForDeepSeekTarget()
+    public async Task Middleware_ConvertsResponsesRequestForDeepSeekEndpoint()
     {
         var config = TestConfig();
         config.LocalModel.Enabled = false;
@@ -110,7 +110,7 @@ public sealed class HttpPipelineTests
             {
                 BaseUrl = "https://api.deepseek.com/v1",
                 ApiKey = "test-key",
-                Provider = "deepseek"
+                Provider = "openai-compatible"
             }
         };
         var options = new TestOptionsMonitor<PrivacyConfig>(config);
@@ -143,6 +143,87 @@ public sealed class HttpPipelineTests
         var userContent = root.GetProperty("messages")[1].GetProperty("content")[0].GetProperty("text").GetString();
         Assert.Contains("[REDACTED:PHONE]", userContent);
         Assert.DoesNotContain("13912345678", userContent);
+    }
+
+    [Fact]
+    public async Task Middleware_DoesNotConvertDeepSeekEmbeddingsInputRequest()
+    {
+        var config = TestConfig();
+        config.LocalModel.Enabled = false;
+        config.Proxy.Targets = new Dictionary<string, UpstreamTarget>
+        {
+            ["default"] = new()
+            {
+                BaseUrl = "https://api.deepseek.com/v1",
+                ApiKey = "test-key",
+                Provider = "openai-compatible"
+            }
+        };
+        var options = new TestOptionsMonitor<PrivacyConfig>(config);
+        var redactor = new PiiRedactor(options);
+        var forwarder = new CapturingForwarder();
+        var middleware = CreateMiddleware(options, redactor, forwarder);
+        var context = CreateJsonContext("/v1/embeddings", """
+        {"model":"deepseek-embedding","input":"hello"}
+        """);
+
+        await middleware.InvokeAsync(context, _ => Task.CompletedTask);
+
+        Assert.NotNull(forwarder.CapturedRequest);
+        Assert.Equal(new Uri("https://api.deepseek.com/v1/embeddings"), forwarder.CapturedRequest!.RequestUri);
+        var body = await forwarder.CapturedRequest.Content!.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("hello", doc.RootElement.GetProperty("input").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("messages", out _));
+    }
+
+    [Fact]
+    public async Task Middleware_UsesResponsesCompatibilityRulesPerRequestModel()
+    {
+        var config = TestConfig();
+        config.LocalModel.Enabled = false;
+        config.Proxy.Targets = new Dictionary<string, UpstreamTarget>
+        {
+            ["default"] = new()
+            {
+                BaseUrl = "https://gateway.example/v1",
+                ApiKey = "test-key",
+                Provider = "openai-compatible",
+                ResponsesCompatibility = "native",
+                ResponsesCompatibilityRules =
+                [
+                    new ResponsesCompatibilityRule { ModelPattern = "deepseek-*", Mode = "deepseek-chat-completions" }
+                ]
+            }
+        };
+        var options = new TestOptionsMonitor<PrivacyConfig>(config);
+        var redactor = new PiiRedactor(options);
+
+        var deepSeekForwarder = new CapturingForwarder();
+        var deepSeekMiddleware = CreateMiddleware(options, redactor, deepSeekForwarder);
+        var deepSeekContext = CreateJsonContext("/v1/responses", """
+        {"model":"deepseek-reasoner","input":"hello"}
+        """);
+        await deepSeekMiddleware.InvokeAsync(deepSeekContext, _ => Task.CompletedTask);
+
+        Assert.Equal(new Uri("https://gateway.example/v1/chat/completions"), deepSeekForwarder.CapturedRequest!.RequestUri);
+        var deepSeekBody = await deepSeekForwarder.CapturedRequest.Content!.ReadAsStringAsync();
+        using var deepSeekDoc = JsonDocument.Parse(deepSeekBody);
+        Assert.False(deepSeekDoc.RootElement.TryGetProperty("input", out _));
+        Assert.Equal("hello", deepSeekDoc.RootElement.GetProperty("messages")[0].GetProperty("content").GetString());
+
+        var gptForwarder = new CapturingForwarder();
+        var gptMiddleware = CreateMiddleware(options, redactor, gptForwarder);
+        var gptContext = CreateJsonContext("/v1/responses", """
+        {"model":"gpt-4.1","input":"hello"}
+        """);
+        await gptMiddleware.InvokeAsync(gptContext, _ => Task.CompletedTask);
+
+        Assert.Equal(new Uri("https://gateway.example/v1/responses"), gptForwarder.CapturedRequest!.RequestUri);
+        var gptBody = await gptForwarder.CapturedRequest.Content!.ReadAsStringAsync();
+        using var gptDoc = JsonDocument.Parse(gptBody);
+        Assert.Equal("hello", gptDoc.RootElement.GetProperty("input").GetString());
+        Assert.False(gptDoc.RootElement.TryGetProperty("messages", out _));
     }
 
     [Fact]

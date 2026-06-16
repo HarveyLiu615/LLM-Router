@@ -9,6 +9,7 @@ public interface IProviderTransformer
 {
     string BuildPath(PathString originalPath, QueryString originalQuery, JsonNode? request, UpstreamTarget target);
     JsonNode TransformRequest(JsonNode request, UpstreamTarget target);
+    JsonNode TransformRequest(PathString originalPath, JsonNode request, UpstreamTarget target) => TransformRequest(request, target);
     void ApplyResponseHeaders(HttpResponseMessage upstreamResponse, UpstreamTarget target);
 }
 
@@ -18,7 +19,6 @@ public sealed class ProviderTransformerRegistry
     {
         ["openai"] = new OpenAiCompatibleTransformer(),
         ["openai-compatible"] = new OpenAiCompatibleTransformer(),
-        ["deepseek"] = new DeepSeekTransformer(),
         ["anthropic"] = new AnthropicTransformer(),
         ["google"] = new GeminiTransformer(),
         ["gemini"] = new GeminiTransformer(),
@@ -39,10 +39,19 @@ public sealed class ProviderTransformerRegistry
 
 public sealed class OpenAiCompatibleTransformer : IProviderTransformer
 {
+    private readonly DeepSeekTransformer _deepSeekTransformer = new();
+
     public string BuildPath(PathString originalPath, QueryString originalQuery, JsonNode? request, UpstreamTarget target) =>
-        NormalizePath(originalPath, target) + originalQuery.ToUriComponent();
+        DeepSeekTransformer.ShouldHandle(target, request)
+            ? _deepSeekTransformer.BuildPath(originalPath, originalQuery, request, target)
+            : NormalizePath(originalPath, target) + originalQuery.ToUriComponent();
 
     public JsonNode TransformRequest(JsonNode request, UpstreamTarget target) => request.DeepClone();
+
+    public JsonNode TransformRequest(PathString originalPath, JsonNode request, UpstreamTarget target) =>
+        DeepSeekTransformer.ShouldHandle(target, request)
+            ? _deepSeekTransformer.TransformRequest(originalPath, request, target)
+            : request.DeepClone();
 
     public void ApplyResponseHeaders(HttpResponseMessage upstreamResponse, UpstreamTarget target)
     {
@@ -63,18 +72,37 @@ public sealed class OpenAiCompatibleTransformer : IProviderTransformer
 
 public sealed class DeepSeekTransformer : IProviderTransformer
 {
+    private const string CompatibilityAuto = "auto";
+    private const string CompatibilityNative = "native";
+    private const string CompatibilityNone = "none";
+    private const string CompatibilityDeepSeekChatCompletions = "deepseek-chat-completions";
+
+    internal static bool ShouldHandle(UpstreamTarget target, JsonNode? request) =>
+        ResolveCompatibilityMode(target, request?["model"]) == CompatibilityDeepSeekChatCompletions;
+
     public string BuildPath(PathString originalPath, QueryString originalQuery, JsonNode? request, UpstreamTarget target)
     {
         var normalized = OpenAiCompatibleTransformer.NormalizePath(originalPath, target);
-        if (normalized.Contains("/responses", StringComparison.OrdinalIgnoreCase))
+        var chatCompletionsPath = ConvertResponsesCreatePath(normalized);
+        if (chatCompletionsPath is not null)
         {
-            return "/chat/completions" + originalQuery.ToUriComponent();
+            return chatCompletionsPath + originalQuery.ToUriComponent();
         }
 
         return normalized + originalQuery.ToUriComponent();
     }
 
-    public JsonNode TransformRequest(JsonNode request, UpstreamTarget target)
+    public JsonNode TransformRequest(JsonNode request, UpstreamTarget target) => TransformResponsesRequest(request);
+
+    public JsonNode TransformRequest(PathString originalPath, JsonNode request, UpstreamTarget target)
+    {
+        var normalized = OpenAiCompatibleTransformer.NormalizePath(originalPath, target);
+        return ConvertResponsesCreatePath(normalized) is not null
+            ? TransformResponsesRequest(request)
+            : request.DeepClone();
+    }
+
+    private static JsonNode TransformResponsesRequest(JsonNode request)
     {
         var obj = request.AsObject();
         if (obj["input"] is null && obj["instructions"] is null && obj["reasoning"] is null && obj["max_output_tokens"] is null)
@@ -160,13 +188,13 @@ public sealed class DeepSeekTransformer : IProviderTransformer
                 if (item is JsonObject inputObject)
                 {
                     var message = ConvertInputObject(inputObject, pendingReasoningContent);
-                    pendingReasoningContent = null;
                     if (message is null)
                     {
                         pendingReasoningContent = MergeText(pendingReasoningContent, ExtractResponsesReasoningText(inputObject));
                         continue;
                     }
 
+                    pendingReasoningContent = null;
                     messages.Add(message);
                 }
                 else if (item is JsonValue inputValue && inputValue.TryGetValue<string>(out var text))
@@ -188,6 +216,81 @@ public sealed class DeepSeekTransformer : IProviderTransformer
         }
 
         return messages;
+    }
+
+    private static string? ConvertResponsesCreatePath(string normalizedPath)
+    {
+        var path = normalizedPath.TrimEnd('/');
+        if (string.Equals(path, "/responses", StringComparison.OrdinalIgnoreCase))
+        {
+            return "/chat/completions";
+        }
+
+        return string.Equals(path, "/v1/responses", StringComparison.OrdinalIgnoreCase)
+            ? "/v1/chat/completions"
+            : null;
+    }
+
+    private static string ResolveCompatibilityMode(UpstreamTarget target, JsonNode? model)
+    {
+        var requestModel = ExtractModel(model);
+        foreach (var rule in target.ResponsesCompatibilityRules)
+        {
+            if (ModelMatches(rule.ModelPattern, requestModel) && !string.IsNullOrWhiteSpace(rule.Mode))
+            {
+                return NormalizeCompatibilityMode(rule.Mode);
+            }
+        }
+
+        var configuredMode = NormalizeCompatibilityMode(target.ResponsesCompatibility);
+        if (string.Equals(configuredMode, CompatibilityAuto, StringComparison.Ordinal))
+        {
+            return IsDeepSeekEndpoint(target.BaseUrl)
+                ? CompatibilityDeepSeekChatCompletions
+                : CompatibilityNative;
+        }
+
+        return configuredMode;
+    }
+
+    private static bool IsDeepSeekEndpoint(string baseUrl) =>
+        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) &&
+        uri.Host.Contains("deepseek", StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeCompatibilityMode(string? mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return CompatibilityAuto;
+        }
+
+        return mode.Trim().ToLowerInvariant() switch
+        {
+            CompatibilityDeepSeekChatCompletions => CompatibilityDeepSeekChatCompletions,
+            CompatibilityNone => CompatibilityNative,
+            CompatibilityNative => CompatibilityNative,
+            CompatibilityAuto => CompatibilityAuto,
+            _ => CompatibilityNative
+        };
+    }
+
+    private static string? ExtractModel(JsonNode? model) =>
+        model is JsonValue value &&
+        value.TryGetValue<string>(out var text)
+            ? text
+            : null;
+
+    private static bool ModelMatches(string? pattern, string? model)
+    {
+        if (string.IsNullOrWhiteSpace(pattern) || string.IsNullOrWhiteSpace(model))
+        {
+            return false;
+        }
+
+        var trimmedPattern = pattern.Trim();
+        return trimmedPattern.EndsWith('*')
+            ? model.StartsWith(trimmedPattern[..^1], StringComparison.OrdinalIgnoreCase)
+            : string.Equals(trimmedPattern, model, StringComparison.OrdinalIgnoreCase);
     }
 
     private static JsonObject? ConvertInputObject(JsonObject item, string? reasoningContent)

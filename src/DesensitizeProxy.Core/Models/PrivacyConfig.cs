@@ -87,6 +87,14 @@ public sealed class UpstreamTarget
     public required string BaseUrl { get; set; }
     public required string ApiKey { get; set; }
     public string? Provider { get; set; }
+    public string? ResponsesCompatibility { get; set; }
+    public List<ResponsesCompatibilityRule> ResponsesCompatibilityRules { get; set; } = [];
+}
+
+public sealed class ResponsesCompatibilityRule
+{
+    public string? ModelPattern { get; set; }
+    public string? Mode { get; set; }
 }
 
 public sealed class RuntimeConfig

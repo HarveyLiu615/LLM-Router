@@ -242,11 +242,6 @@ curl http://127.0.0.1:8403/v1/models
           "ApiKey": "${OPENAI_API_KEY}",
           "Provider": "openai"
         },
-        "deepseek": {
-          "BaseUrl": "https://api.deepseek.com/v1",
-          "ApiKey": "${DEEPSEEK_API_KEY}",
-          "Provider": "deepseek"
-        },
         "anthropic": {
           "BaseUrl": "https://api.anthropic.com/v1",
           "ApiKey": "${ANTHROPIC_API_KEY}",
@@ -265,11 +260,26 @@ curl http://127.0.0.1:8403/v1/models
 
 路由规则：
 
-- OpenAI-compatible 路径，例如 `/v1/chat/completions` 和 `/v1/responses`，匹配 `openai`、`openai-compatible` 或 `deepseek` target。
-- DeepSeek target 使用 Bearer 鉴权，并原样转发 Chat Completions 请求。对于 `/v1/responses`，代理会先把请求体转换为 `/chat/completions` 形态再转发，包括 DeepSeek 思考模式需要的 `thinking.type`、`reasoning_effort` 和工具调用场景的 `reasoning_content` 回传；响应保持上游原生形态。
+- OpenAI-compatible 路径，例如 `/v1/chat/completions` 和 `/v1/responses`，匹配 provider 为 `openai` 或 `openai-compatible` 的 target。
+- DeepSeek-compatible endpoint 应按 OpenAI-compatible target 配置。官方 DeepSeek host 会自动启用 Responses 到 Chat Completions 的兼容转换。多模型网关可用 `ResponsesCompatibilityRules` 按模型启用，例如 `{ "ModelPattern": "deepseek-*", "Mode": "deepseek-chat-completions" }`。未命中的模型保持原生转发，所以在 Codex 或 Claude Code 里切换模型不需要修改代理配置。
 - Anthropic 原生路径，例如 `/v1/messages`，匹配 `anthropic` target。
 - Gemini 原生路径，例如 `/v1beta/models/gemini-2.5-flash:generateContent`，匹配 `gemini`、`google` 或 `vertex` target。
 - 没有匹配到协议 target 时，使用 `DefaultTarget`。
+
+OpenAI-compatible 多模型网关示例：
+
+```json
+{
+  "BaseUrl": "https://gateway.example/v1",
+  "ApiKey": "${GATEWAY_API_KEY}",
+  "Provider": "openai-compatible",
+  "ResponsesCompatibility": "native",
+  "ResponsesCompatibilityRules": [
+    { "ModelPattern": "deepseek-*", "Mode": "deepseek-chat-completions" },
+    { "ModelPattern": "deepseek/*", "Mode": "deepseek-chat-completions" }
+  ]
+}
+```
 
 Gemini 原生请求示例：
 
