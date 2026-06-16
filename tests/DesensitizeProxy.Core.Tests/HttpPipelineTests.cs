@@ -100,6 +100,52 @@ public sealed class HttpPipelineTests
     }
 
     [Fact]
+    public async Task Middleware_ConvertsResponsesRequestForDeepSeekTarget()
+    {
+        var config = TestConfig();
+        config.LocalModel.Enabled = false;
+        config.Proxy.Targets = new Dictionary<string, UpstreamTarget>
+        {
+            ["default"] = new()
+            {
+                BaseUrl = "https://api.deepseek.com/v1",
+                ApiKey = "test-key",
+                Provider = "deepseek"
+            }
+        };
+        var options = new TestOptionsMonitor<PrivacyConfig>(config);
+        var redactor = new PiiRedactor(options);
+        var forwarder = new CapturingForwarder();
+        var middleware = CreateMiddleware(options, redactor, forwarder);
+        var context = CreateJsonContext("/v1/responses", """
+        {
+          "model":"deepseek-reasoner",
+          "instructions":"sys",
+          "input":[{"role":"user","content":[{"type":"input_text","text":"电话13912345678"}]}],
+          "reasoning":{"effort":"high"},
+          "stream":true
+        }
+        """);
+
+        await middleware.InvokeAsync(context, _ => Task.CompletedTask);
+
+        Assert.NotNull(forwarder.CapturedRequest);
+        Assert.Equal(new Uri("https://api.deepseek.com/v1/chat/completions"), forwarder.CapturedRequest!.RequestUri);
+        Assert.Equal("Bearer", forwarder.CapturedRequest.Headers.Authorization?.Scheme);
+        var body = await forwarder.CapturedRequest.Content!.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        Assert.Equal("deepseek-reasoner", root.GetProperty("model").GetString());
+        Assert.False(root.TryGetProperty("input", out _));
+        Assert.Equal("high", root.GetProperty("reasoning_effort").GetString());
+        Assert.True(root.GetProperty("stream_options").GetProperty("include_usage").GetBoolean());
+        Assert.Equal("sys", root.GetProperty("messages")[0].GetProperty("content").GetString());
+        var userContent = root.GetProperty("messages")[1].GetProperty("content")[0].GetProperty("text").GetString();
+        Assert.Contains("[REDACTED:PHONE]", userContent);
+        Assert.DoesNotContain("13912345678", userContent);
+    }
+
+    [Fact]
     public async Task Middleware_ForwardsModelsRequestWithoutJsonBodyParsing()
     {
         var config = TestConfig();

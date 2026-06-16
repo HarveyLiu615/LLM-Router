@@ -9,3 +9,4 @@ artifacts/
 .vs/
 .vscode/
 .idea/
+src/DesensitizeProxy.AspNetCore/appsettings.Development.json

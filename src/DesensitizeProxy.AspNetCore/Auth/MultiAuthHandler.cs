@@ -9,7 +9,7 @@ public static class MultiAuthHandler
         var provider = target.Provider?.ToLowerInvariant();
         return provider switch
         {
-            null or "openai" or "openai-compatible" => new Dictionary<string, string>
+            null or "openai" or "openai-compatible" or "deepseek" => new Dictionary<string, string>
             {
                 ["Authorization"] = $"Bearer {Expand(target.ApiKey)}"
             },

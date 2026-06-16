@@ -8,7 +8,7 @@
 [![YARP](https://img.shields.io/badge/YARP-2.3-blue)](https://microsoft.github.io/reverse-proxy/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-DesensitizeProxy is a privacy-preserving reverse proxy built with ASP.NET Core and YARP. Clients can keep using OpenAI-compatible, Anthropic, Gemini, or Vertex-style APIs. The proxy rewrites textual request bodies before forwarding them and injects the correct authentication headers for each upstream provider.
+DesensitizeProxy is a privacy-preserving reverse proxy built with ASP.NET Core and YARP. Clients can keep using OpenAI-compatible, DeepSeek, Anthropic, Gemini, or Vertex-style APIs. The proxy rewrites textual request bodies before forwarding them and injects the correct authentication headers for each upstream provider.
 
 ```text
 Client -> Regex redaction -> Rule engine -> Optional local LLM redaction -> Provider transform -> Upstream LLM
@@ -21,7 +21,7 @@ The default policy favors availability: Regex redaction always runs first; if th
 - **Local-first redaction**: Regex rules run first and cover phone numbers, national IDs, email addresses, SSH private keys, AWS keys, database connection strings, delivery tracking numbers, access codes, and more.
 - **Optional semantic redaction**: Use Ollama or another OpenAI-compatible local model to extract PII as JSON, then let application code perform deterministic replacement.
 - **Fail-safe boundary**: Regex redaction runs again before LLM-redacted text is written back, preventing already-redacted content from being restored.
-- **Multi-provider forwarding**: Supports OpenAI-compatible, Anthropic, Gemini, and Vertex request forwarding with provider-specific authentication transforms.
+- **Multi-provider forwarding**: Supports OpenAI-compatible, DeepSeek, Anthropic, Gemini, and Vertex request forwarding with provider-specific authentication transforms.
 - **Rule-engine triage**: Uses Trigger / Hint / None decisions to call the local LLM only when it is useful.
 - **Cross-platform deployment**: Supports Docker, Docker Compose, systemd, launchd, Windows Service, and multi-RID publishing.
 - **Observability**: Provides `/health`, Prometheus-style metrics, and JSON Lines redaction audit logs.
@@ -242,6 +242,11 @@ The proxy selects an upstream target from the request protocol and path. The `mo
           "ApiKey": "${OPENAI_API_KEY}",
           "Provider": "openai"
         },
+        "deepseek": {
+          "BaseUrl": "https://api.deepseek.com/v1",
+          "ApiKey": "${DEEPSEEK_API_KEY}",
+          "Provider": "deepseek"
+        },
         "anthropic": {
           "BaseUrl": "https://api.anthropic.com/v1",
           "ApiKey": "${ANTHROPIC_API_KEY}",
@@ -260,7 +265,8 @@ The proxy selects an upstream target from the request protocol and path. The `mo
 
 Routing rules:
 
-- OpenAI-compatible paths such as `/v1/chat/completions` and `/v1/responses` match `openai` or `openai-compatible` targets.
+- OpenAI-compatible paths such as `/v1/chat/completions` and `/v1/responses` match `openai`, `openai-compatible`, or `deepseek` targets.
+- DeepSeek targets use Bearer authentication and forward Chat Completions requests as-is. For `/v1/responses`, the request body is converted to `/chat/completions` shape before forwarding, including `thinking.type`, `reasoning_effort`, and tool-call `reasoning_content` carry-over required by DeepSeek thinking mode; responses remain upstream-native.
 - Anthropic native paths such as `/v1/messages` match `anthropic` targets.
 - Gemini native paths such as `/v1beta/models/gemini-2.5-flash:generateContent` match `gemini`, `google`, or `vertex` targets.
 - When no protocol-specific target matches, `DefaultTarget` is used.
